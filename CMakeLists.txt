@@ -233,3 +233,5 @@ target_link_libraries(numabench Vc cpuset)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
    target_link_libraries(numabench rt)
 endif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+
+configure_file(processOutput.sh processOutput.sh COPYONLY)
