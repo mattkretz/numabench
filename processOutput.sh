@@ -4,6 +4,16 @@ if ! test -f "$1"; then
 	exit 1
 fi
 
+if ! which gawk >/dev/null 2>&1; then
+	echo "you need to have 'gawk' in your PATH"
+	exit 1
+fi
+
+if ! which gnuplot >/dev/null 2>&1; then
+	echo "you need to have 'gnuplot' in your PATH"
+	exit 1
+fi
+
 maxy=7
 test -n "$2" && test $2 -gt 0 && maxy=$2
 
@@ -116,6 +126,7 @@ if which ps2pdf14 > /dev/null 2>&1; then
 	rm "$psfile"
 	echo "-> $1.pdf"
 else
+	echo "Install ps2pdf14 to get PDF output"
 	echo "-> $psfile"
 fi
 
