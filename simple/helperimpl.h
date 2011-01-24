@@ -29,13 +29,6 @@ namespace Internal
 
 template<> struct HelperImpl<Vc::ScalarImpl>
 {
-    template<typename V, typename M, typename A>
-    static inline void ALWAYS_INLINE deinterleave(V &a, V &b, const M *mem, A)
-    {
-        a = mem[0];
-        b = mem[1];
-    }
-
     static inline void prefetchForOneRead(const void *) {}
     static inline void prefetchForModify(const void *) {}
     static inline void prefetchClose(const void *) {}
