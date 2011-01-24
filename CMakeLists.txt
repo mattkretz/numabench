@@ -83,16 +83,6 @@ if(COMPILER_IS_OPEN64)
    set(CMAKE_C_FLAGS_RELEASE        "${CMAKE_C_FLAGS_RELEASE} -O3")
    set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} -DNDEBUG -O3")
 
-   if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-      set(ENABLE_STRICT_ALIASING true CACHE BOOL "Enables strict aliasing rules for more aggressive optimizations")
-      if(NOT ENABLE_STRICT_ALIASING)
-         set(CMAKE_CXX_FLAGS_RELEASE        "${CMAKE_CXX_FLAGS_RELEASE} -fno-strict-aliasing ")
-         set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -fno-strict-aliasing ")
-         set(CMAKE_C_FLAGS_RELEASE        "${CMAKE_C_FLAGS_RELEASE} -fno-strict-aliasing ")
-         set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} -fno-strict-aliasing ")
-      endif(NOT ENABLE_STRICT_ALIASING)
-   endif(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-
    # if compiling for 32 bit x86 we need to use the -mfpmath=sse since the x87 is broken by design
    if(NOT VOID_PTR_IS_64BIT)
       exec_program(${CMAKE_C_COMPILER} ARGS -dumpmachine OUTPUT_VARIABLE _gcc_machine)
@@ -149,16 +139,6 @@ elseif(COMPILER_IS_GCC)
       endif(NOT GCC_4_3_0)
    endif(NOT GCC_4_4_1)
 
-   if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-      set(ENABLE_STRICT_ALIASING true CACHE BOOL "Enables strict aliasing rules for more aggressive optimizations")
-      if(NOT ENABLE_STRICT_ALIASING)
-         set(CMAKE_CXX_FLAGS_RELEASE        "${CMAKE_CXX_FLAGS_RELEASE} -fno-strict-aliasing ")
-         set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -fno-strict-aliasing ")
-         set(CMAKE_C_FLAGS_RELEASE        "${CMAKE_C_FLAGS_RELEASE} -fno-strict-aliasing ")
-         set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} -fno-strict-aliasing ")
-      endif(NOT ENABLE_STRICT_ALIASING)
-   endif(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-
    # if compiling for 32 bit x86 we need to use the -mfpmath=sse since the x87 is broken by design
    if(NOT VOID_PTR_IS_64BIT)
       exec_program(${CMAKE_C_COMPILER} ARGS -dumpmachine OUTPUT_VARIABLE _gcc_machine)
@@ -198,13 +178,6 @@ elseif(COMPILER_IS_INTEL)
    set(CMAKE_C_FLAGS_RELWITHDEBINFO   "${CMAKE_C_FLAGS_RELWITHDEBINFO} -DNDEBUG -O3")
 
    set(ALIAS_FLAGS "-no-ansi-alias")
-   if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-      # default ICC to -no-ansi-alias because otherwise tests/utils_sse fails. So far I suspect a miscompilation...
-      set(ENABLE_STRICT_ALIASING false CACHE BOOL "Enables strict aliasing rules for more aggressive optimizations")
-      if(ENABLE_STRICT_ALIASING)
-         set(ALIAS_FLAGS "-ansi-alias")
-      endif(ENABLE_STRICT_ALIASING)
-   endif(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
 
    # iomanip from latest libstdc++ makes ICC fail unless C++0x is selected
    AddCompilerFlag("-std=c++0x")
@@ -231,4 +204,32 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/incl
 add_library(Vc STATIC vector.cpp common/support.cpp)
 add_target_property(Vc COMPILE_FLAGS "-DVC_COMPILE_LIB")
 
-add_subdirectory(benchmarks)
+find_file(HAVE_SYS_MMAN sys/mman.h)
+if(NOT HAVE_SYS_MMAN)
+   message(ERROR "could not find required sys/mman.h header to enable memlocking")
+   add_definitions(-DVC_BENCHMARK_NO_MLOCK)
+endif()
+mark_as_advanced(HAVE_SYS_MMAN)
+
+add_library(cpuset STATIC benchmarks/cpuset.c)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+   set(REALTIME_BENCHMARKS FALSE CACHE BOOL "Use SCHED_FIFO priority to give benchmarks highest priority, achieving less jitter in the results.")
+   if(REALTIME_BENCHMARKS)
+      add_executable(benchmark benchmarks/benchmark.cpp)
+      add_definitions(-DSCHED_FIFO_BENCHMARKS)
+      add_custom_command(TARGET benchmark POST_BUILD
+         COMMAND sudo chown root benchmark
+         COMMAND sudo chmod +s benchmark
+         WORKING_DIRECTORY "${CMAKE_CURRENT_BUILD_DIR}"
+         COMMENT "Making the benchmark helper suid root"
+         )
+   endif(REALTIME_BENCHMARKS)
+endif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+
+add_executable(membench_sse benchmarks/membench.cpp)
+add_target_property(membench_sse COMPILE_FLAGS "-DVC_IMPL=SSE")
+target_link_libraries(membench_sse Vc cpuset)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+   target_link_libraries(membench_sse rt)
+endif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
