@@ -227,6 +227,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
    endif(REALTIME_BENCHMARKS)
 endif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 
+add_executable(cpuid cpuid.cpp)
+
 add_executable(numabench benchmarks/numabench.cpp)
 add_target_property(numabench COMPILE_FLAGS "-DVC_IMPL=SSE")
 target_link_libraries(numabench Vc cpuset)
