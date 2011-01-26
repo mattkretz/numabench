@@ -667,30 +667,12 @@ int main(int argc, char **argv)
 
     int i = 2;
     Benchmark::FileWriter *file = 0;
-    enum {
-        UseAllCpus = -2,
-        UseAnyOneCpu = -1
-    };
-    int useCpus = UseAnyOneCpu;
     while (argc > i) {
         if (std::strcmp(argv[i - 1], "-o") == 0) {
             file = new Benchmark::FileWriter(argv[i]);
             i += 2;
         } else if (std::strcmp(argv[i - 1], "-t") == 0) {
             g_Time = atof(argv[i]);
-            i += 2;
-        } else if (std::strcmp(argv[i - 1], "-cpu") == 0) {
-// On OS X there is no way to set CPU affinity
-// TODO there is a way to ask the system to not move the process around
-#ifndef __APPLE__
-            if (std::strcmp(argv[i], "all") == 0) {
-                useCpus = UseAllCpus;
-            } else if (std::strcmp(argv[i], "any") == 0) {
-                useCpus = UseAnyOneCpu;
-            } else {
-                useCpus = atoi(argv[i]);
-            }
-#endif
             i += 2;
         } else if (std::strcmp(argv[i - 1], "--help") == 0 ||
                     std::strcmp(argv[i - 1], "-help") == 0 ||
@@ -712,44 +694,8 @@ int main(int argc, char **argv)
         g_arguments.push_back(argv[i - 1]);
     }
 
-    int r = 0;
-    if (useCpus == UseAnyOneCpu) {
-        r += bmain();
-        Benchmark::finalize();
-    } else {
-        cpu_set_t cpumask;
-        sched_getaffinity(0, sizeof(cpu_set_t), &cpumask);
-        int cpucount = cpuCount(&cpumask);
-        if (cpucount > 1) {
-            Benchmark::addColumn("CPU_ID");
-        }
-        if (useCpus == UseAllCpus) {
-            for (int cpuid = 0; cpuid < cpucount; ++cpuid) {
-                if (cpucount > 1) {
-                    std::ostringstream str;
-                    str << cpuid;
-                    Benchmark::setColumnData("CPU_ID", str.str());
-                }
-                cpuZero(&cpumask);
-                cpuSet(cpuid, &cpumask);
-                sched_setaffinity(0, sizeof(cpu_set_t), &cpumask);
-                r += bmain();
-                Benchmark::finalize();
-            }
-        } else {
-            int cpuid = std::min(cpucount - 1, std::max(0, useCpus));
-            if (cpucount > 1) {
-                std::ostringstream str;
-                str << cpuid;
-                Benchmark::setColumnData("CPU_ID", str.str());
-            }
-            cpuZero(&cpumask);
-            cpuSet(cpuid, &cpumask);
-            sched_setaffinity(0, sizeof(cpu_set_t), &cpumask);
-            r += bmain();
-            Benchmark::finalize();
-        }
-    }
+    int r = bmain();
+    Benchmark::finalize();
     delete file;
     return r;
 }
