@@ -23,8 +23,11 @@
 #include <sys/mman.h>
 #include <fstream>
 #include "../cpuid.h"
+#ifdef NO_LIBNUMA
 #include "cpuset.h"
+#else
 #include "numa.h"
+#endif
 
 using namespace Vc;
 
@@ -280,14 +283,20 @@ static void executeTest(const char *name, MemT &mem, void (*testFun)(MemT &__res
 }
 
 SET_HELP_TEXT(
+#ifdef NO_LIBNUMA
+        "  --firstCpu <id>\n"
+        "  --cpuStep <id>\n"
+#else
         "  --firstNode <id>\n"
         "  --nodeStep <id>\n"
+#endif
         "  --size <GB>\n"
         "  --only <test function>\n"
         );
 
 int bmain()
 {
+#ifndef NO_LIBNUMA
     if (numa_available() == -1) {
         std::cerr << "NUMA interface does not work. Abort." << std::endl;
         return 1;
@@ -296,6 +305,7 @@ int bmain()
     // first make sure we don't get interleaved memory; this would defeat the purpose of this
     // benchmark
     //numa_set_interleave_mask(numa_no_nodes);
+#endif
 
     const size_t maxMemorySize = largestMemorySize() / GB;
     const size_t memorySize = valueForArgument("--size", maxMemorySize);
@@ -309,6 +319,19 @@ int bmain()
     Memory<double_v> mem(memorySize * GB / sizeof(double));
     mlockall(MCL_CURRENT);
 
+#ifdef NO_LIBNUMA
+    cpu_set_t cpumask;
+    sched_getaffinity(0, sizeof(cpu_set_t), &cpumask);
+    int cpucount = cpuCount(&cpumask);
+    Benchmark::addColumn("CPU_ID");
+    for (int cpuid = valueForArgument("--firstCpu", 1); cpuid < cpucount; cpuid += valueForArgument("--cpuStep", 6)) {
+        std::ostringstream str;
+        str << cpuid;
+        Benchmark::setColumnData("CPU_ID", str.str());
+        cpuZero(&cpumask);
+        cpuSet(cpuid, &cpumask);
+        sched_setaffinity(0, sizeof(cpu_set_t), &cpumask);
+#else
     // libnuma defines:
     // node: an area where all memory as the same speed as seen from a particular CPU. A node
     //       can contain multiple CPUs
@@ -316,11 +339,10 @@ int bmain()
     int nodeCount = numa_max_node();
     struct bitmask *nodemask = 0;
     if (nodeCount < 0) {
-        nodeCount = 1;
+        nodeCount = 0;
     } else {
         nodemask = numa_allocate_nodemask();
     }
-
     Benchmark::addColumn("NUMA_ID");
     for (int numaId = valueForArgument("--firstNode", 0); numaId <= nodeCount; numaId += valueForArgument("--nodeStep", 1)) {
         std::ostringstream str;
@@ -332,6 +354,7 @@ int bmain()
             numa_bitmask_setbit(nodemask, numaId);
             numa_bind(nodemask);
         }
+#endif
 
         executeTest("bzero", mem, &testBzero);
         executeTest("read",  mem, &testRead);
@@ -342,8 +365,10 @@ int bmain()
         Benchmark::finalize();
     }
 
+#ifndef NO_LIBNUMA
     if (nodemask) {
         numa_free_nodemask(nodemask);
     }
+#endif
     return 0;
 }
