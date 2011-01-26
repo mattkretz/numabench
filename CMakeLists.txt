@@ -229,9 +229,11 @@ endif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 
 add_executable(cpuid cpuid.cpp)
 
+find_library(LIBNUMA numa)
+
 add_executable(numabench benchmarks/numabench.cpp)
 add_target_property(numabench COMPILE_FLAGS "-DVC_IMPL=SSE")
-target_link_libraries(numabench Vc cpuset)
+target_link_libraries(numabench Vc cpuset ${LIBNUMA})
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
    target_link_libraries(numabench rt)
 endif(CMAKE_SYSTEM_NAME STREQUAL "Linux")

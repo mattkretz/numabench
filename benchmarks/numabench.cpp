@@ -24,6 +24,7 @@
 #include <fstream>
 #include "../cpuid.h"
 #include "cpuset.h"
+#include "numa.h"
 
 using namespace Vc;
 
@@ -279,14 +280,23 @@ static void executeTest(const char *name, MemT &mem, void (*testFun)(MemT &__res
 }
 
 SET_HELP_TEXT(
-        "  --firstCpu <id>\n"
-        "  --cpuStep <id>\n"
+        "  --firstNode <id>\n"
+        "  --nodeStep <id>\n"
         "  --size <GB>\n"
         "  --only <test function>\n"
         );
 
 int bmain()
 {
+    if (numa_available() == -1) {
+        std::cerr << "NUMA interface does not work. Abort." << std::endl;
+        return 1;
+    }
+
+    // first make sure we don't get interleaved memory; this would defeat the purpose of this
+    // benchmark
+    //numa_set_interleave_mask(numa_no_nodes);
+
     const size_t maxMemorySize = largestMemorySize() / GB;
     const size_t memorySize = valueForArgument("--size", maxMemorySize);
     if (memorySize < 1) {
@@ -299,19 +309,30 @@ int bmain()
     Memory<double_v> mem(memorySize * GB / sizeof(double));
     mlockall(MCL_CURRENT);
 
-    cpu_set_t cpumask;
-    sched_getaffinity(0, sizeof(cpu_set_t), &cpumask);
-    int cpucount = cpuCount(&cpumask);
-    Benchmark::addColumn("CPU_ID");
-    for (int cpuid = valueForArgument("--firstCpu", 1); cpuid < cpucount; cpuid += valueForArgument("--cpuStep", 6)) {
-        if (cpucount > 1) {
-            std::ostringstream str;
-            str << cpuid;
-            Benchmark::setColumnData("CPU_ID", str.str());
+    // libnuma defines:
+    // node: an area where all memory as the same speed as seen from a particular CPU. A node
+    //       can contain multiple CPUs
+    // cpu: a hardware thread?
+    int nodeCount = numa_max_node();
+    struct bitmask *nodemask = 0;
+    if (nodeCount < 0) {
+        nodeCount = 1;
+    } else {
+        nodemask = numa_allocate_nodemask();
+    }
+
+    Benchmark::addColumn("NUMA_ID");
+    for (int numaId = valueForArgument("--firstNode", 0); numaId <= nodeCount; numaId += valueForArgument("--nodeStep", 1)) {
+        std::ostringstream str;
+        str << numaId;
+        Benchmark::setColumnData("NUMA_ID", str.str());
+
+        if (nodemask) {
+            numa_bitmask_clearall(nodemask);
+            numa_bitmask_setbit(nodemask, numaId);
+            numa_bind(nodemask);
         }
-        cpuZero(&cpumask);
-        cpuSet(cpuid, &cpumask);
-        sched_setaffinity(0, sizeof(cpu_set_t), &cpumask);
+
         executeTest("bzero", mem, &testBzero);
         executeTest("read",  mem, &testRead);
         executeTest("read w/ prefetch", mem, &testReadPrefetch);
@@ -319,6 +340,10 @@ int bmain()
         executeTest("add 1 w/ prefetch", mem, &testAddOnePrefetch);
         executeTest("read latency", mem, &testReadLatency);
         Benchmark::finalize();
+    }
+
+    if (nodemask) {
+        numa_free_nodemask(nodemask);
     }
     return 0;
 }
