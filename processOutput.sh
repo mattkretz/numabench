@@ -121,6 +121,16 @@ EOF
 done
 IFS="$oldIFS"
 
+# The Postscript file contains lines like this now:
+# %%Title: /tmp/tmp.Rtu83pEYfL.ps
+# /Title (/tmp/tmp.Rtu83pEYfL.ps)
+#
+# We'd like to have nicer title
+sed -i \
+  -e 's/%%Title: .*$/%%Title: '"$1"'/' \
+  -e 's/\/Title \(.*\)$/\/Title ('"$1"')/' \
+  "$psfile"
+
 if which ps2pdf14 > /dev/null 2>&1; then
 	ps2pdf14 "$psfile" "$1.pdf"
 	rm "$psfile"
