@@ -64,6 +64,9 @@ BEGIN {
          } else {
             data[row, col] = value
          }
+         if(length(factor) > 0) {
+            data[row, col] *= factor
+         }
          ++row
       }
    }
@@ -97,9 +100,9 @@ for title in ${testnames}; do
 		ylabel="Latency [cycles/read]"
 		;;
 	*)
-		gawk -f "$awkscript" "-vfilter=$title:" "-vvalueIndex=8" "-vinvert=0" "$1" >> "$csv"
+		gawk -f "$awkscript" "-vfilter=$title:" "-vvalueIndex=8" "-vinvert=0" "-vfactor=1e-9" "$1" >> "$csv"
 		lmaxy="[0:]"
-		ylabel="Throughput [bytes/second]"
+		ylabel="Throughput [GB/s]"
 		;;
 	esac
 	head=`cat "$csv"|head -n1|cut -f2-`
