@@ -282,17 +282,21 @@ static void executeTest(const char *name, MemT &mem, void (*testFun)(MemT &__res
     }
 }
 
-SET_HELP_TEXT(
 #ifdef NO_LIBNUMA
+SET_HELP_TEXT(
         "  --firstCpu <id>\n"
         "  --cpuStep <id>\n"
-#else
-        "  --firstNode <id>\n"
-        "  --nodeStep <id>\n"
-#endif
         "  --size <GB>\n"
         "  --only <test function>\n"
         );
+#else
+SET_HELP_TEXT(
+        "  --firstNode <id>\n"
+        "  --nodeStep <id>\n"
+        "  --size <GB>\n"
+        "  --only <test function>\n"
+        );
+#endif
 
 int bmain()
 {
