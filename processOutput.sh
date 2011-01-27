@@ -90,7 +90,9 @@ for title in ${testnames}; do
 	echo -n "#" > "$csv"
 	if echo "$title" | grep -q "latency"; then
 		gawk -f "$awkscript" "-vfilter=$title:" "-vvalueIndex=10" "-vinvert=1" "$1" >> "$csv"
-		lmaxy="[0:65]"
+		tmp=`cut -d'"' -f3 "$csv"|sort -u|tail -n1|cut -d. -f1`
+		tmp=$((($tmp+9)/10*10))
+		lmaxy="[0:$tmp]"
 		ylabel="Latency [cycles/read]"
 	else
 		gawk -f "$awkscript" "-vfilter=$title:" "-vvalueIndex=8" "-vinvert=0" "$1" >> "$csv"
@@ -109,12 +111,15 @@ for title in ${testnames}; do
 	done
 	commands="${commands%,}"
 	gnuplot <<EOF
+set grid y
 set terminal postscript color
 set output "$csv.ps"
-set title "$title"
+set title "$1         $title"
 set ylabel "$ylabel"
 set xlabel "$xlabel"
-plot [0:$width] ${lmaxy} $commands
+set xrange [0:$width]
+set yrange ${lmaxy}
+plot $commands
 EOF
 	cat "$csv.ps" >> "$psfile"
 	rm "$csv" "$csv.ps"
