@@ -298,6 +298,8 @@ SET_HELP_TEXT(
         );
 #endif
 
+extern "C" void numa_init();
+
 int bmain()
 {
 #ifndef NO_LIBNUMA
@@ -343,8 +345,14 @@ int bmain()
     int nodeCount = numa_max_node();
     struct bitmask *nodemask = 0;
     if (nodeCount < 0) {
-        std::cerr << "libnuma does not report any NUMA nodes\n";
-        nodeCount = 0;
+        numa_init();
+        nodeCount = numa_max_node();
+        if (nodeCount < 0) {
+            std::cerr << "libnuma does not report any NUMA nodes\n";
+            nodeCount = 0;
+        } else {
+            nodemask = numa_allocate_nodemask();
+        }
     } else {
         nodemask = numa_allocate_nodemask();
     }
