@@ -88,17 +88,20 @@ for title in ${testnames}; do
 	IFS="$oldIFS"
 	csv=`mktemp`
 	echo -n "#" > "$csv"
-	if echo "$title" | grep -q "latency"; then
+	case "$title" in
+	*latency*)
 		gawk -f "$awkscript" "-vfilter=$title:" "-vvalueIndex=10" "-vinvert=1" "$1" >> "$csv"
 		tmp=`cut -d'"' -f3 "$csv"|sort -u|tail -n1|cut -d. -f1`
-		tmp=$((($tmp+9)/10*10))
+		tmp=$(($tmp/10*10+10))
 		lmaxy="[0:$tmp]"
 		ylabel="Latency [cycles/read]"
-	else
+		;;
+	*)
 		gawk -f "$awkscript" "-vfilter=$title:" "-vvalueIndex=8" "-vinvert=0" "$1" >> "$csv"
 		lmaxy="[0:]"
 		ylabel="Throughput [bytes/second]"
-	fi
+		;;
+	esac
 	head=`cat "$csv"|head -n1|cut -f2-`
 	width=`cat "$csv"|wc -l`
 	width=$(($width-2))
