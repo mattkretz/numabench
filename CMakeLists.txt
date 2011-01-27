@@ -52,6 +52,11 @@ endif(GATHER_SET)
 
 set(SSE_INTRINSICS_BROKEN false)
 
+set(STATIC_BINARIES FALSE CACHE BOOL "You can request to build statically linked binaries. This makes it very easy to deploy the benchmark to your test systems.")
+if(STATIC_BINARIES)
+   add_definitions(-DLINK_STATICALLY)
+endif()
+
 if(COMPILER_IS_OPEN64)
    # Open64 is detected as GNUCXX :(
    AddCompilerFlag("-W")
@@ -110,6 +115,10 @@ if(COMPILER_IS_OPEN64)
       endif(NOT _as_good)
    endif(NOT _binutils_as)
    mark_as_advanced(_binutils_as)
+
+   if(STATIC_BINARIES)
+      set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
+   endif()
 elseif(COMPILER_IS_GCC)
    ##################################################################################################
    #                                              GCC                                               #
@@ -167,6 +176,10 @@ elseif(COMPILER_IS_GCC)
       endif(NOT _as_good)
    endif(NOT _binutils_as)
    mark_as_advanced(_binutils_as)
+
+   if(STATIC_BINARIES)
+      set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
+   endif()
 elseif(COMPILER_IS_INTEL)
    ##################################################################################################
    #                                          Intel Compiler                                        #
@@ -185,12 +198,20 @@ elseif(COMPILER_IS_INTEL)
    # per default icc is not IEEE compliant, but we need that for verification
    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   ${ALIAS_FLAGS} -w1 -fp-model precise")
    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ALIAS_FLAGS} -w1 -fp-model precise")
+
+   if(STATIC_BINARIES)
+      set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
+   endif()
 elseif(COMPILER_IS_MSVC)
    AddCompilerFlag("/wd4800") # Disable warning "forcing value to bool"
    add_definitions(-D_CRT_SECURE_NO_WARNINGS)
    # MSVC does not support inline assembly on 64 bit! :(
    # searching the help for xgetbv doesn't turn up anything. So just fall back to not supporting AVX on Windows :(
    add_definitions(-DVC_NO_XGETBV)
+
+   if(STATIC_BINARIES)
+      message(AUTHOR_WARNING "what is the flag to build static binaries on Windows?")
+   endif()
 endif()
 
 OptimizeForArchitecture()

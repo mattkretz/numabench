@@ -307,6 +307,9 @@ int bmain()
         std::cerr << "NUMA interface does not work. Abort." << std::endl;
         return 1;
     }
+#ifdef LINK_STATICALLY
+    numa_init();
+#endif
 
     // first make sure we don't get interleaved memory; this would defeat the purpose of this
     // benchmark
@@ -345,14 +348,8 @@ int bmain()
     int nodeCount = numa_max_node();
     struct bitmask *nodemask = 0;
     if (nodeCount < 0) {
-        numa_init();
-        nodeCount = numa_max_node();
-        if (nodeCount < 0) {
-            std::cerr << "libnuma does not report any NUMA nodes\n";
-            nodeCount = 0;
-        } else {
-            nodemask = numa_allocate_nodemask();
-        }
+        std::cerr << "libnuma does not report any NUMA nodes\n";
+        nodeCount = 0;
     } else {
         nodemask = numa_allocate_nodemask();
     }
