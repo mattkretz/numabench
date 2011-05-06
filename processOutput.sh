@@ -94,7 +94,7 @@ for title in ${testnames}; do
 	case "$title" in
 	*latency*)
 		gawk -f "$awkscript" "-vfilter=$title:" "-vvalueIndex=10" "-vinvert=1" "$1" >> "$csv"
-		tmp=`cut -d'"' -f3 "$csv"|sort -u|tail -n1|cut -d. -f1`
+		tmp=`cut -f2 "$csv"|sort -un|tail -n1|cut -d. -f1`
 		tmp=$(($tmp/10*10+10))
 		lmaxy="[0:$tmp]"
 		ylabel="Latency [cycles/read]"
