@@ -231,6 +231,8 @@ void CpuId::init()
     bool checkLeaf4 = false;
     do {
         CPUID(2);
+        //std::cerr << "CPUID(2): 0x" << std::hex << eax << ", 0x" << std::hex << ebx
+                                //<< ", 0x" << std::hex << ecx << ", 0x" << std::hex << edx << std::endl;
         if (repeat == 0) {
             repeat = eax & 0xff;
         }
@@ -267,6 +269,8 @@ void CpuId::init()
         eax = 1;
         for (int i = 0; eax & 0x1f; ++i) {
             CPUID_C(4, i);
+            //std::cerr << "CPUID_C(4, " << i << "): 0x" << std::hex << eax << ", 0x" << std::hex << ebx
+                                                   //<< ", 0x" << std::hex << ecx << ", 0x" << std::hex << edx << std::endl;
             const int cacheLevel = (eax >> 5) & 7;
             //const int sharedBy = 1 + ((eax >> 14) & 0xfff);
             const int linesize = 1 + (ebx & 0xfff);   ebx >>= 12;
