@@ -36,6 +36,7 @@ int main(int argc, char **argv)
     printFeature(processorType);
     printFeature(processorFamily);
     printFeature(processorModel);
+    printFeature(logicalProcessors);
     printFeature(isAmd);
     printFeature(isIntel);
     printFeature(hasSse3);

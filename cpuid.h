@@ -41,6 +41,7 @@ class CpuId
         static ProcessorType processorType() { return s_processorType; }
         static uint processorFamily() { return s_processorFamily; }
         static uint processorModel() { return s_processorModel; }
+        static uint logicalProcessors() { return s_logicalProcessors; }
         static bool isAmd   () { return s_ecx0 == 0x444D4163; }
         static bool isIntel () { return s_ecx0 == 0x6C65746E; }
         static bool hasSse3 () { return s_processorFeaturesC & (1 << 0); }
