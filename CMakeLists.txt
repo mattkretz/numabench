@@ -193,9 +193,6 @@ elseif(COMPILER_IS_INTEL)
 
    set(ALIAS_FLAGS "-no-ansi-alias")
 
-   # iomanip from latest libstdc++ makes ICC fail unless C++0x is selected
-   AddCompilerFlag("-std=c++0x")
-
    # per default icc is not IEEE compliant, but we need that for verification
    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   ${ALIAS_FLAGS} -w1 -fp-model precise")
    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ALIAS_FLAGS} -w1 -fp-model precise")
@@ -213,6 +210,12 @@ elseif(COMPILER_IS_MSVC)
    if(STATIC_BINARIES)
       message(AUTHOR_WARNING "what is the flag to build static binaries on Windows?")
    endif()
+endif()
+
+# We want C++11 code
+AddCompilerFlag("-std=c++11" _yes)
+if(NOT _yes)
+   AddCompilerFlag("-std=c++0x")
 endif()
 
 OptimizeForArchitecture()
