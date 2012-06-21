@@ -514,10 +514,12 @@ void BenchmarkRunner::executeTest(const char *name, TestFunction testFun, const 
         size_t size = sizes[i];
         if (size > 0) {
             size /= 2;
-            std::stringstream ss;
-            ss << name << " (" << size / 1024 << "kB)";
-            if (m_only.empty() || m_only == ss.str()) {
+            std::stringstream ss0;
+            ss0 << name << " (" << size / 1024 << "kB)";
+            if (m_only.empty() || m_only == ss0.str()) {
                 for (size_t offset = 0; offset <= m_memory->vectorsCount() - step; offset += step) {
+                    std::stringstream ss;
+                    ss << ss0.str();
                     ss << ": " << offset * sizeof(double_v) / GB << " - "
                         << (offset + size / 16) * sizeof(double_v) / GB;
                     const int repetitions = step / size;
