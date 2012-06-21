@@ -47,12 +47,73 @@
 
 #include "tsc.h"
 
-#if !defined(WIN32) && !defined(__APPLE__)
-//#define VC_USE_CPU_TIME
+#ifndef _MSC_VER
+static inline double convertTimeSpec(const struct timespec &ts)
+{
+    return static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) * 1e-9;
+}
 #endif
 
-// limit to max. 10s per single benchmark
-static double g_Time = 10.;
+class Timer
+{
+private:
+#ifdef _MSC_VER
+    __int64 m_startTime;
+#elif defined(__APPLE__)
+    uint64_t m_startTime;
+#else
+    struct timespec m_startTime;
+#endif
+    TimeStampCounter m_tsc;
+
+    struct ElapsedTime
+    {
+        double real;
+        double cycles;
+    } m_elapsed;
+
+public:
+    inline void start() {
+#ifdef _MSC_VER
+        QueryPerformanceCounter((LARGE_INTEGER *)&m_startTime);
+#elif defined(__APPLE__)
+        m_startTime = mach_absolute_time();
+#else
+        clock_gettime( CLOCK_MONOTONIC, &m_startTime );
+#endif
+        m_tsc.Start();
+    }
+    inline void stop()
+    {
+        m_tsc.Stop();
+#ifdef _MSC_VER
+        __int64 real = 0, freq = 0;
+        QueryPerformanceCounter((LARGE_INTEGER *)&real);
+        QueryPerformanceFrequency((LARGE_INTEGER *)&freq);
+        m_elapsed.real = static_cast<double>(real - m_startTime) / freq;
+#elif defined(__APPLE__)
+        uint64_t real = mach_absolute_time();
+        static mach_timebase_info_data_t info = {0,0};
+
+        if (info.denom == 0)
+            mach_timebase_info(&info);
+
+        uint64_t nanos = (real - m_startTime ) * (info.numer / info.denom);
+        m_elapsed.real = nanos * 1e-9;
+#else
+        struct timespec real;
+        clock_gettime( CLOCK_MONOTONIC, &real );
+        m_elapsed.real = convertTimeSpec(real) - convertTimeSpec(m_startTime);
+#endif
+        m_elapsed.cycles = m_tsc.Cycles();
+    }
+    inline double realTime() const {
+        return m_elapsed.real;
+    }
+    inline double cycles() const {
+        return m_elapsed.cycles;
+    }
+};
 
 class Benchmark
 {
@@ -103,10 +164,7 @@ public:
         fX = X;
     }
 
-    bool wantsMoreDataPoints() const;
-    void Start();
-    void Mark();
-    void Stop();
+    void addTiming(const Timer &t);
     void Print();
 
 private:
@@ -116,17 +174,8 @@ private:
     const std::string fName;
     double fFactor;
     std::string fX;
-#ifdef _MSC_VER
-    __int64 fRealTime;
-#elif defined(__APPLE__)
-    uint64_t fRealTime;
-#else
-    struct timespec fRealTime;
-    struct timespec fCpuTime;
-#endif
-    double m_mean[3];
-    double m_stddev[3];
-    TimeStampCounter fTsc;
+    double m_mean[2];
+    double m_stddev[2];
     int m_dataPointsCount;
     static FileWriter *s_fileWriter;
 };
@@ -240,7 +289,7 @@ Benchmark::FileWriter *Benchmark::s_fileWriter = 0;
 Benchmark::Benchmark(const std::string &_name, double factor, const std::string &X)
     : fName(_name), fFactor(factor), fX(X), m_dataPointsCount(0)
 {
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 2; ++i) {
         m_mean[i] = m_stddev[i] = 0.;
     }
     enum {
@@ -251,16 +300,9 @@ Benchmark::Benchmark(const std::string &_name, double factor, const std::string 
         char header[128 * WCHARSIZE];
         std::memset(header, 0, 128 * WCHARSIZE);
         std::strcpy(header,
-#ifdef VC_USE_CPU_TIME
-                "┏━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━"
-#endif
                 "┏━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┓");
         if (!interpret) {
-#ifdef VC_USE_CPU_TIME
-            header[69 * WCHARSIZE] = '\0';
-#else
             header[(69 - 17) * WCHARSIZE] = '\0';
-#endif
         }
         const int titleLen = fName.length();
         const int headerLen = std::strlen(header) / WCHARSIZE;
@@ -276,84 +318,6 @@ Benchmark::Benchmark(const std::string &_name, double factor, const std::string 
             std::cout << fName << std::flush;
         }
     }
-}
-
-inline void Benchmark::Start()
-{
-#ifdef _MSC_VER
-    QueryPerformanceCounter((LARGE_INTEGER *)&fRealTime);
-#elif defined(__APPLE__)
-    fRealTime = mach_absolute_time();
-#else
-#ifdef VC_USE_CPU_TIME
-    clock_gettime( CLOCK_PROCESS_CPUTIME_ID, &fCpuTime );
-#endif
-    clock_gettime( CLOCK_MONOTONIC, &fRealTime );
-#endif
-    fTsc.Start();
-}
-
-#ifndef _MSC_VER
-static inline double convertTimeSpec(const struct timespec &ts)
-{
-    return static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) * 1e-9;
-}
-#endif
-
-static const double SECONDS_PER_CLOCK = 1. / CLOCKS_PER_SEC;
-
-bool Benchmark::wantsMoreDataPoints() const
-{
-    if (m_dataPointsCount < 3) { // hard limit on the number of data points; otherwise talking about stddev is bogus
-        return true;
-    } else if (m_mean[0] > g_Time) { // limit on the time
-        return false;
-    } else if (m_dataPointsCount < 30) { // we want initial statistics
-        return true;
-    }
-    return m_stddev[0] * m_dataPointsCount > 1.0004 * m_mean[0] * m_mean[0]; // stop if the relative error is below 2% already
-}
-
-inline void Benchmark::Stop()
-{
-    fTsc.Stop();
-#ifdef _MSC_VER
-    __int64 real = 0, freq = 0;
-    QueryPerformanceCounter((LARGE_INTEGER *)&real);
-    QueryPerformanceFrequency((LARGE_INTEGER *)&freq);
-    const double elapsedRealTime = static_cast<double>(real - fRealTime) / freq;
-#elif defined(__APPLE__)
-    uint64_t real = mach_absolute_time();
-    static mach_timebase_info_data_t info = {0,0};  
-    
-    if (info.denom == 0)  
-    	mach_timebase_info(&info);  
-    
-    uint64_t nanos = (real - fRealTime ) * (info.numer / info.denom);
-    const double elapsedRealTime = nanos * 1e-9;
-#else
-    struct timespec real;
-    clock_gettime( CLOCK_MONOTONIC, &real );
-#ifdef VC_USE_CPU_TIME
-    struct timespec cpu;
-    clock_gettime( CLOCK_PROCESS_CPUTIME_ID, &cpu );
-    const double elapsedCpuTime = convertTimeSpec(cpu ) - convertTimeSpec(fCpuTime );
-    m_mean[2] += elapsedCpuTime;
-    m_stddev[2] += elapsedCpuTime * elapsedCpuTime;
-#endif
-    const double elapsedRealTime = convertTimeSpec(real) - convertTimeSpec(fRealTime);
-#endif
-    m_mean[0] += elapsedRealTime;
-    m_mean[1] += fTsc.Cycles();
-    m_stddev[0] += elapsedRealTime * elapsedRealTime;
-    m_stddev[1] += fTsc.Cycles() * fTsc.Cycles();
-    ++m_dataPointsCount;
-}
-
-inline void Benchmark::Mark()
-{
-    Stop();
-    Start();
 }
 
 static inline void prettyPrintSeconds(double v)
@@ -475,29 +439,25 @@ inline void Benchmark::printMiddleLine() const
 {
     const bool interpret = (fFactor != 0.);
     std::cout << "\n"
-#ifdef VC_USE_CPU_TIME
-        "┠────────────────"
-#endif
         "┠────────────────╂────────────────"
         << (interpret ?
-#ifdef VC_USE_CPU_TIME
-                "╂────────────────"
-#endif
                 "╂────────────────╂────────────────╂────────────────┨" : "┨");
 }
 inline void Benchmark::printBottomLine() const
 {
     const bool interpret = (fFactor != 0.);
     std::cout << "\n"
-#ifdef VC_USE_CPU_TIME
-        "┗━━━━━━━━━━━━━━━━"
-#endif
         "┗━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━"
         << (interpret ?
-#ifdef VC_USE_CPU_TIME
-                "┻━━━━━━━━━━━━━━━━"
-#endif
                 "┻━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━┛" : "┛") << std::endl;
+}
+
+inline void Benchmark::addTiming(const Timer &t) {
+    m_mean[0] += t.realTime();
+    m_mean[1] += t.cycles();
+    m_stddev[0] += t.realTime() * t.realTime();
+    m_stddev[1] += t.cycles() * t.cycles();
+    ++m_dataPointsCount;
 }
 
 inline void Benchmark::Print()
@@ -512,21 +472,12 @@ inline void Benchmark::Print()
     header
         << "Real_time" << "Real_time_stddev"
         << "Cycles" << "Cycles_stddev"
-#ifdef VC_USE_CPU_TIME
-        << "CPU_time" << "CPU_time_stddev"
-#endif
     ;
 
     // ┃ ━ ┏ ┓ ┗ ┛ ┣ ┫ ┳ ┻ ╋ ┠ ─ ╂ ┨
     std::cout << "\n"
-#ifdef VC_USE_CPU_TIME
-        << "┃    CPU time    "
-#endif
         << "┃   Real time    ┃     Cycles     ┃";
     if (interpret) {
-#ifdef VC_USE_CPU_TIME
-        std::cout << centered(fX + "/s [CPU]")  << "┃";
-#endif
         std::cout << centered(fX + "/s [Real]") << "┃";
         std::cout << centered(fX + "/cycle")    << "┃";
         std::cout << centered("cycles/" + fX)   << "┃";
@@ -539,9 +490,6 @@ inline void Benchmark::Print()
         header
             << X + "/Real_time" << X + "/Real_time_stddev"
             << X + "/Cycles" << X + "/Cycles_stddev"
-#ifdef VC_USE_CPU_TIME
-            << X + "/CPU_time" << X + "/CPU_time_stddev"
-#endif
             << "number_of_" + X;
     }
     printMiddleLine();
@@ -558,36 +506,19 @@ inline void Benchmark::Print()
     m_mean[1] *= normalization;
     m_stddev[1] = std::sqrt(m_stddev[1] * normalization - m_mean[1] * m_mean[1]);
     dataLine << m_mean[1] << m_stddev[1];
-#ifdef VC_USE_CPU_TIME
-    m_mean[2] *= normalization;
-    m_stddev[2] = std::sqrt(m_stddev[2] * normalization - m_mean[2] * m_mean[2]);
-    dataLine << m_mean[2] << m_stddev[2];
-#endif
-    double stddevint[3];
+    double stddevint[2];
     stddevint[0] = fFactor * m_stddev[0] / (m_mean[0] * m_mean[0]);
     stddevint[1] = fFactor * m_stddev[1] / (m_mean[1] * m_mean[1]);
     dataLine << fFactor / m_mean[0] << stddevint[0];
     dataLine << fFactor / m_mean[1] << stddevint[1];
-#ifdef VC_USE_CPU_TIME
-    stddevint[2] = fFactor * m_stddev[2] / (m_mean[2] * m_mean[2]);
-    dataLine << fFactor / m_mean[2] << stddevint[2];
-#endif
     dataLine << fFactor;
 
     std::cout << "\n┃ ";
-#ifdef VC_USE_CPU_TIME
-    prettyPrintSeconds(m_mean[2]);
-    std::cout << " ┃ ";
-#endif
     prettyPrintSeconds(m_mean[0]);
     std::cout << " ┃ ";
     prettyPrintCount(m_mean[1]);
     std::cout << " ┃ ";
     if (interpret) {
-#ifdef VC_USE_CPU_TIME
-        prettyPrintCount(fFactor / m_mean[2]);
-        std::cout << " ┃ ";
-#endif
         prettyPrintCount(fFactor / m_mean[0]);
         std::cout << " ┃ ";
         prettyPrintCount(fFactor / m_mean[1]);
@@ -596,19 +527,11 @@ inline void Benchmark::Print()
         std::cout << " ┃ ";
     }
     std::cout << "\n┃ ";
-#ifdef VC_USE_CPU_TIME
-    prettyPrintError(m_stddev[2] * 100. / m_mean[2]);
-    std::cout << " ┃ ";
-#endif
     prettyPrintError(m_stddev[0] * 100. / m_mean[0]);
     std::cout << " ┃ ";
     prettyPrintError(m_stddev[1] * 100. / m_mean[1]);
     std::cout << " ┃ ";
     if (interpret) {
-#ifdef VC_USE_CPU_TIME
-        prettyPrintError(m_stddev[2] * 100. / m_mean[2]);
-        std::cout << " ┃ ";
-#endif
         prettyPrintError(m_stddev[0] * 100. / m_mean[0]);
         std::cout << " ┃ ";
         prettyPrintError(m_stddev[1] * 100. / m_mean[1]);
@@ -670,9 +593,6 @@ int main(int argc, char **argv)
     while (argc > i) {
         if (std::strcmp(argv[i - 1], "-o") == 0) {
             file = new Benchmark::FileWriter(argv[i]);
-            i += 2;
-        } else if (std::strcmp(argv[i - 1], "-t") == 0) {
-            g_Time = atof(argv[i]);
             i += 2;
         } else if (std::strcmp(argv[i - 1], "--help") == 0 ||
                     std::strcmp(argv[i - 1], "-help") == 0 ||
