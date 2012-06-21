@@ -217,6 +217,7 @@ AddCompilerFlag("-std=c++11" _yes)
 if(NOT _yes)
    AddCompilerFlag("-std=c++0x")
 endif()
+AddCompilerFlag("-pthread")
 
 OptimizeForArchitecture()
 
@@ -261,17 +262,24 @@ if(USE_LIBNUMA AND NOT LIBNUMA)
    message(WARNING "libnuma was not found. Building without.")
 endif()
 
+add_library(cpuset STATIC benchmarks/cpuset.c)
+
+add_executable(add1test benchmarks/add1test.cpp)
+add_target_property(add1test COMPILE_FLAGS "-DVC_IMPL=SSE")
+target_link_libraries(add1test Vc)
+target_link_libraries(add1test cpuset)
+
 add_executable(numabench benchmarks/numabench.cpp)
 add_target_property(numabench COMPILE_FLAGS "-DVC_IMPL=SSE")
 target_link_libraries(numabench Vc)
 if(LIBNUMA AND USE_LIBNUMA)
    target_link_libraries(numabench ${LIBNUMA})
 else()
-   add_library(cpuset STATIC benchmarks/cpuset.c)
    target_link_libraries(numabench cpuset)
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
    target_link_libraries(numabench rt)
+   target_link_libraries(add1test rt)
 endif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 
 configure_file(processOutput.sh processOutput.sh COPYONLY)
