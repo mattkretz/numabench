@@ -18,10 +18,13 @@
 
 */
 
-#include <Vc/Vc>
+#include <Vc/Vc>/*{{{*/
 #include "benchmark.h"
 #include <sys/mman.h>
 #include <fstream>
+#include <thread>
+#include <mutex>
+#include <atomic>
 #include "../cpuid.h"
 #ifdef NO_LIBNUMA
 #include "cpuset.h"
@@ -29,9 +32,222 @@
 #include "numa.h"
 #endif
 
-using namespace Vc;
+extern "C" void numa_init();
 
-static size_t largestMemorySize()
+using namespace Vc;/*}}}*/
+
+enum Constants {/*{{{*/
+    PageSize = 4096,
+    CacheLineSize = 64,
+
+    DoublesInPage = PageSize / sizeof(double),
+    VectorsInPage = PageSize / sizeof(double_v),
+    DoublesInCacheLine = CacheLineSize / sizeof(double),
+    VectorsInCacheLine = CacheLineSize / sizeof(double_v)
+};
+static const size_t GB = 1024ull * 1024ull * 1024ull;
+static const size_t step = GB / sizeof(double_v);/*}}}*/
+
+typedef Memory<double_v> MemT;
+struct TestArguments
+{
+    MemT *__restrict__ mem;
+    Timer *__restrict__ timer;
+    size_t offset;
+    size_t size;
+    int repetitions;
+};
+typedef void (*TestFunction)(const TestArguments &args);
+
+class OneWaitsForN/*{{{*/
+{
+private:
+    std::mutex mutex;
+    std::condition_variable wait;
+    std::atomic<int> busyCount;
+public:
+    OneWaitsForN(int count)
+        : busyCount(count)
+    {
+    }
+
+    void oneReady()
+    {
+        if (busyCount-- == 1) {
+            mutex.lock();
+            wait.notify_one();
+            mutex.unlock();
+        }
+    }
+
+    void waitForAll()
+    {
+        if (busyCount > 0) {
+            std::unique_lock<std::mutex> lock(mutex);
+            if (busyCount > 0) {
+                wait.wait(lock);
+            }
+        }
+    }
+};/*}}}*/
+
+class ThreadData/*{{{*/
+{
+    cpu_set_t m_cpumask;
+    std::mutex m_mutex;
+    std::condition_variable_any &m_wait;
+    OneWaitsForN &m_waitForEnd;
+    std::atomic<bool> m_exit;
+    Timer m_timer;
+    std::thread m_thread;
+    TestFunction m_testFunction;
+    TestArguments m_arguments;
+
+    public:
+        ThreadData(OneWaitsForN *waitForEnd, std::condition_variable_any *wait) // called from main thread
+            : m_wait(*wait),
+            m_waitForEnd(*waitForEnd),
+            m_exit(false),
+            m_thread(ThreadData::callMainLoop, this)
+        {}
+
+        const Timer &timer() const { return m_timer; }
+
+        void setPinning(int cpuid) // called from main thread
+        {
+            m_mutex.lock();
+            cpuZero(&m_cpumask);
+            cpuSet(cpuid, &m_cpumask);
+            m_mutex.unlock();
+        }
+
+        void exit() // called from main thread
+        {
+            m_exit = true;
+        }
+
+        void join() // called from main thread
+        {
+            m_thread.join();
+        }
+
+        void setTestFunction(TestFunction f)
+        {
+            m_mutex.lock();
+            m_testFunction = f;
+            m_mutex.unlock();
+        }
+
+        void setParameters(TestArguments args)
+        {
+            m_mutex.lock();
+            m_arguments = args;
+            m_arguments.timer = &m_timer;
+            m_mutex.unlock();
+        }
+
+        static void callMainLoop(ThreadData *data) // thread
+        {
+            data->mainLoop();
+        }
+
+    private:
+        void mainLoop() // thread
+        {
+            m_mutex.lock();
+            do {
+                m_waitForEnd.oneReady();
+
+                // wait for the signal to start
+                m_wait.wait(m_mutex);
+
+                if (m_exit) {
+                    break;
+                }
+
+                // first pin the thread to a single core/cpu
+                sched_setaffinity(0, sizeof(cpu_set_t), &m_cpumask);
+
+                // do the work
+                m_testFunction(m_arguments);
+            } while (!m_exit);
+            m_waitForEnd.oneReady();
+            m_mutex.unlock();
+        }
+};/*}}}*/
+
+class ThreadPool/*{{{*/
+{
+    OneWaitsForN m_waitForEnd;
+    std::condition_variable_any m_waitForStart;
+    std::vector<std::shared_ptr<ThreadData>> m_workers;
+public:
+    ThreadPool(int _size)
+        : m_waitForEnd(_size),
+        m_workers(_size)
+    {
+        for (int i = 0; i < _size; ++i) {
+            m_workers[i] = std::make_shared<ThreadData>(&m_waitForEnd, &m_waitForStart);
+        }
+    }
+
+    size_t size() const { return m_workers.size(); }
+
+    void waitReady()
+    {
+        m_waitForEnd.waitForAll();
+    }
+
+    void setPinning(int firstCpu)
+    {
+        for (size_t i = 0; i < m_workers.size(); ++i) {
+            m_workers[i]->setPinning(firstCpu + i);
+        }
+    }
+    void setPinning(std::vector<int> cpus)
+    {
+        assert(m_workers.size() == cpus.size());
+        for (size_t i = 0; i < m_workers.size(); ++i) {
+            m_workers[i]->setPinning(cpus[i]);
+        }
+    }
+
+    void setTestFunction(TestFunction f)
+    {
+        for (auto &t : m_workers) {
+            t->setTestFunction(f);
+        }
+    }
+
+    template<typename OffsetFunction>
+    void executeWith(MemT *mem, OffsetFunction offset, size_t _size, int repetitions)
+    {
+        for (auto &t : m_workers) {
+            t->setParameters({ mem, nullptr, offset(), _size, repetitions });
+        }
+        m_waitForStart.notify_all();
+    }
+
+    template<typename F> void eachTimer(F f) const
+    {
+        for (const auto &t : m_workers) {
+            f(t->timer());
+        }
+    }
+
+    ~ThreadPool()
+    {
+        for (auto &t : m_workers) {
+            t->exit();
+        }
+        m_waitForStart.notify_all();
+        for (auto &t : m_workers) {
+            t->join();
+        }
+    }
+};/*}}}*/
+
+static size_t largestMemorySize()/*{{{*/
 {
     using namespace std;
     fstream meminfo("/proc/meminfo", fstream::in);
@@ -40,45 +256,27 @@ static size_t largestMemorySize()
     meminfo >> tmp >> totalMem >> tmp >> tmp >> freeMem;
     meminfo.close();
     return freeMem * 1024;
-}
+}/*}}}*/
 
-double blackHole = 0.;
-
-static const size_t GB = 1024ull * 1024ull * 1024ull;
-static const size_t step = GB / sizeof(double_v);
-typedef Memory<double_v> MemT;
-
-void testBzero(
-    MemT &__restrict__ m,
-    Benchmark &__restrict__ timer,
-    const size_t offset,
-    const size_t size,
-    const int repetitions
-        )
+void testBzero(const TestArguments &args)/*{{{*/
 {
-    timer.Start();
-    for (int rep = 0; rep < repetitions; ++rep) {
-        bzero(m + offset * double_v::Size, size * sizeof(double_v));
+    args.timer->start();
+    for (int rep = 0; rep < args.repetitions; ++rep) {
+        bzero((*args.mem) + args.offset * double_v::Size, args.size * sizeof(double_v));
     }
-    timer.Stop();
-}
+    args.timer->stop();
+}/*}}}*/
 
-void testAddOne(
-    MemT &__restrict__ mem,
-    Benchmark &__restrict__ timer,
-    const size_t offset,
-    const size_t size,
-    const int repetitions
-        )
+void testAddOne(const TestArguments &args)/*{{{*/
 {
     const double_v one = 1.;
 
-    double *__restrict__ mStart = mem.entries() + offset * double_v::Size;
+    double *__restrict__ mStart = args.mem->entries() + args.offset * double_v::Size;
 
-    timer.Start();
-    for (int rep = 0; rep < repetitions; ++rep) {
+    args.timer->start();
+    for (int rep = 0; rep < args.repetitions; ++rep) {
         double *__restrict__ m = mStart;
-        for (size_t i = 0; i < size; i += 4) {
+        for (size_t i = 0; i < args.size; i += 4) {
             (double_v(m + 0) + one).store(m + 0);
             (double_v(m + 2) + one).store(m + 2);
             (double_v(m + 4) + one).store(m + 4);
@@ -86,25 +284,19 @@ void testAddOne(
             m += 8;
         }
     }
-    timer.Stop();
-}
+    args.timer->stop();
+}/*}}}*/
 
-void testAddOnePrefetch(
-    MemT &__restrict__ mem,
-    Benchmark &__restrict__ timer,
-    const size_t offset,
-    const size_t size,
-    const int repetitions
-        )
+void testAddOnePrefetch(const TestArguments &args)/*{{{*/
 {
     const double_v one = 1.;
 
-    double *__restrict__ mStart = mem.entries() + offset * double_v::Size;
+    double *__restrict__ mStart = args.mem->entries() + args.offset * double_v::Size;
 
-    timer.Start();
-    for (int rep = 0; rep < repetitions; ++rep) {
+    args.timer->start();
+    for (int rep = 0; rep < args.repetitions; ++rep) {
         double *__restrict__ m = mStart;
-        for (size_t i = 0; i < size; i += 4) {
+        for (size_t i = 0; i < args.size; i += 4) {
             Vc::prefetchForModify(m + 1024);
             (double_v(m + 0) + one).store(m + 0);
             (double_v(m + 2) + one).store(m + 2);
@@ -113,22 +305,16 @@ void testAddOnePrefetch(
             m += 8;
         }
     }
-    timer.Stop();
-}
+    args.timer->stop();
+}/*}}}*/
 
-void testRead(
-    MemT &__restrict__ mem,
-    Benchmark &__restrict__ timer,
-    const size_t offset,
-    const size_t size,
-    const int repetitions
-        )
+void testRead(const TestArguments &args)/*{{{*/
 {
-    double *__restrict__ mStart = mem.entries() + offset * double_v::Size;
-    timer.Start();
-    for (int rep = 0; rep < repetitions; ++rep) {
+    double *__restrict__ mStart = args.mem->entries() + args.offset * double_v::Size;
+    args.timer->start();
+    for (int rep = 0; rep < args.repetitions; ++rep) {
         double *__restrict__ m = mStart;
-        for (size_t i = 0; i < size; i += 4) {
+        for (size_t i = 0; i < args.size; i += 4) {
             const double_v v0(m + 0);
             const double_v v1(m + 2);
             const double_v v2(m + 4);
@@ -137,22 +323,16 @@ void testRead(
             m += 8;
         }
     }
-    timer.Stop();
-}
+    args.timer->stop();
+}/*}}}*/
 
-void testReadPrefetch(
-    MemT &__restrict__ mem,
-    Benchmark &__restrict__ timer,
-    const size_t offset,
-    const size_t size,
-    const int repetitions
-        )
+void testReadPrefetch(const TestArguments &args)/*{{{*/
 {
-    double *__restrict__ mStart = mem.entries() + offset * double_v::Size;
-    timer.Start();
-    for (int rep = 0; rep < repetitions; ++rep) {
+    double *__restrict__ mStart = args.mem->entries() + args.offset * double_v::Size;
+    args.timer->start();
+    for (int rep = 0; rep < args.repetitions; ++rep) {
         double *__restrict__ m = mStart;
-        for (size_t i = 0; i < size; i += 4) {
+        for (size_t i = 0; i < args.size; i += 4) {
             Vc::prefetchForOneRead(m + 1024);
             const double_v v0(m + 0);
             const double_v v1(m + 2);
@@ -162,20 +342,10 @@ void testReadPrefetch(
             m += 8;
         }
     }
-    timer.Stop();
-}
+    args.timer->stop();
+}/*}}}*/
 
-enum {
-    PageSize = 4096,
-    CacheLineSize = 64,
-
-    DoublesInPage = PageSize / sizeof(double),
-    VectorsInPage = PageSize / sizeof(double_v),
-    DoublesInCacheLine = CacheLineSize / sizeof(double),
-    VectorsInCacheLine = CacheLineSize / sizeof(double_v)
-};
-
-/**
+/** testReadLatency {{{
  * We want to measure the latency of a read from memory. To achieve this we read with a stride of
  * PageSize bytes. Then the hardware prefetcher will not do any prefetches and every load will hit a
  * cold cache line. To increase the working size the test then starts over but with an offset of one
@@ -185,48 +355,61 @@ enum {
  * [                x                               x               ...]
  * [                        x                               x       ...]
  */
-void testReadLatency(
-        MemT &__restrict__ mem,
-        Benchmark &__restrict__ timer,
-        const size_t offset,
-        const size_t size,
-        const int repetitions
-        )
+void testReadLatency(const TestArguments &args)
 {
     typedef double *__restrict__ Ptr;
-    Ptr const mStart = mem.entries() + offset * double_v::Size;
-    Ptr const mEnd = mStart + size * 2;
+    Ptr const mStart = args.mem->entries() + args.offset * double_v::Size;
+    Ptr const mEnd = mStart + args.size * 2;
     Ptr const mPageEnd = mStart + DoublesInPage;
-    timer.changeInterpretation(repetitions * size / VectorsInCacheLine, "read");
-    timer.Start();
-    for (int rep = 0; rep < repetitions; ++rep) {
-        for (Ptr mCacheLine = mStart; mCacheLine < mPageEnd; mCacheLine += DoublesInCacheLine) {
-            for (Ptr m = mCacheLine; m < mEnd; m += DoublesInPage) {
-                asm("" :: "r"(*m));
+    args.timer->start();
+    if (((mEnd - mStart) / DoublesInCacheLine) & 1) {
+        for (int rep = 0; rep < args.repetitions; ++rep) {
+            for (Ptr mCacheLine = mStart; mCacheLine < mPageEnd; mCacheLine += DoublesInCacheLine) {
+                for (Ptr m = mCacheLine; m < mEnd; m += DoublesInPage) {
+                    asm("" :: "d"(*m));
+                }
+            }
+        }
+    } else if (((mEnd - mStart) / DoublesInCacheLine) & 2) {
+        for (int rep = 0; rep < args.repetitions; ++rep) {
+            for (Ptr mCacheLine = mStart; mCacheLine < mPageEnd; mCacheLine += DoublesInCacheLine) {
+                for (Ptr m = mCacheLine; m < mEnd - DoublesInPage; m += 2 * DoublesInPage) {
+                    asm("" :: "d"(*m));
+                    asm("" :: "d"(*(m + DoublesInPage)));
+                }
+            }
+        }
+    } else {
+        for (int rep = 0; rep < args.repetitions; ++rep) {
+            for (Ptr mCacheLine = mStart; mCacheLine < mPageEnd; mCacheLine += DoublesInCacheLine) {
+                for (Ptr m = mCacheLine; m < mEnd - 3 * DoublesInPage; m += 4 * DoublesInPage) {
+                    asm("" :: "d"(*m));
+                    asm("" :: "d"(*(m + DoublesInPage)));
+                    asm("" :: "d"(*(m + 2 * DoublesInPage)));
+                    asm("" :: "d"(*(m + 3 * DoublesInPage)));
+                }
             }
         }
     }
-    timer.Stop();
-}
+    args.timer->stop();
+}/*}}}*/
 
-template<typename T>
-struct convertStringTo
+template<typename T> struct convertStringTo/*{{{*/
 {
     explicit convertStringTo(const std::string &s);
     operator T() { return m_data; }
     T m_data;
 };
-
-template<> convertStringTo<int>::convertStringTo(const std::string &s) : m_data(atoi(s.c_str())) {}
+/*}}}*/
+template<> convertStringTo<int>::convertStringTo(const std::string &s) : m_data(atoi(s.c_str())) {}/*{{{*/
 template<> convertStringTo<unsigned int>::convertStringTo(const std::string &s) : m_data(atoi(s.c_str())) {}
 template<> convertStringTo<long>::convertStringTo(const std::string &s) : m_data(atol(s.c_str())) {}
 template<> convertStringTo<unsigned long>::convertStringTo(const std::string &s) : m_data(atol(s.c_str())) {}
 template<> convertStringTo<long long>::convertStringTo(const std::string &s) : m_data(atoll(s.c_str())) {}
 template<> convertStringTo<unsigned long long>::convertStringTo(const std::string &s) : m_data(atoll(s.c_str())) {}
-template<> convertStringTo<std::string>::convertStringTo(const std::string &s) : m_data(s) {}
+template<> convertStringTo<std::string>::convertStringTo(const std::string &s) : m_data(s) {}/*}}}*/
 
-template<typename T>
-static T valueForArgument(const char *name, T defaultValue)
+template<typename T> static T valueForArgument(const char *name, T defaultValue)/*{{{*/
 {
     ArgumentVector::iterator it = std::find(g_arguments.begin(), g_arguments.end(), name);
     if (it != g_arguments.end()) {
@@ -236,58 +419,17 @@ static T valueForArgument(const char *name, T defaultValue)
         }
     }
     return defaultValue;
-}
+}/*}}}*/
 
-static void executeTest(const char *name, MemT &mem, void (*testFun)(MemT &__restrict__,
-            Benchmark &__restrict__, const size_t, const size_t, const int))
-{
-    static std::string only = valueForArgument("--only", std::string());
-    if (!only.empty() && only != name) {
-        return;
-    }
-    for (size_t offset = 0; offset <= mem.vectorsCount() - step; offset += step) {
-        std::stringstream ss;
-        ss << name << ": " << offset * sizeof(double_v) / GB << " - "
-            << (offset + step) * sizeof(double_v) / GB;
-        {
-            Benchmark timer(ss.str().c_str(), step, "Byte");
-            for (int rep = 0; rep < 2; ++rep) {
-                testFun(mem, timer, offset, step / 16, 1);
-            }
-            timer.Print();
-        }
-
-        size_t sizes[] = {
-            CpuId::L1Data(),
-            CpuId::L2Data(),
-            CpuId::L3Data()
-        };
-        for (int i = 0; i < 3; ++i) {
-            size_t size = sizes[i];
-            if (size > 0) {
-                size /= 2;
-                //size *= 2;
-                //size /= 3;
-                ss.str(std::string());
-                ss << name << " (" << size / 1024 << "kB): " << offset * sizeof(double_v) / GB << " - "
-                                           << (offset + size / 16) * sizeof(double_v) / GB;
-                const int repetitions = step / size;
-                Benchmark timer(ss.str().c_str(), size * repetitions, "Byte");
-                for (int rep = 0; rep < 2; ++rep) {
-                    testFun(mem, timer, offset, size / 16, repetitions);
-                }
-                timer.Print();
-            }
-        }
-    }
-}
-
+/*SET_HELP_TEXT{{{*/
 #ifdef NO_LIBNUMA
 SET_HELP_TEXT(
         "  --firstCpu <id>\n"
         "  --cpuStep <id>\n"
         "  --size <GB>\n"
         "  --only <test function>\n"
+        "  --threads <N>\n"
+        "  --onlyCpus <id[,id[,id[,id[...]]]]>\n"
         );
 #else
 SET_HELP_TEXT(
@@ -295,17 +437,122 @@ SET_HELP_TEXT(
         "  --nodeStep <id>\n"
         "  --size <GB>\n"
         "  --only <test function>\n"
+        "  --threads <N>\n"
+        "  --onlyCpus <id[,id[,id[,id[...]]]]>\n"
         );
-#endif
+#endif/*}}}*/
 
-extern "C" void numa_init();
-
-int bmain()
+class BenchmarkRunner/*{{{*/
 {
-#ifndef NO_LIBNUMA
+private:
+    std::vector<int> m_onlyCpuIds;
+    const int m_threadCount;
+    ThreadPool m_threadPool;
+    const size_t m_maxMemorySize;
+    const size_t m_memorySize;
+    const std::string m_only;
+    MemT *m_memory;
+
+    void executeTest(const char *name, TestFunction testFun, const char *unit, double interpretFactor);
+    void executeAllTests();
+
+public:
+    BenchmarkRunner();
+};/*}}}*/
+
+void BenchmarkRunner::executeTest(const char *name, TestFunction testFun, const char *unit, double interpretFactor)/*{{{*/
+{
+    m_threadPool.setTestFunction(testFun);
+    if (m_only.empty() || m_only == name) {
+        for (size_t offset = 0; offset <= m_memory->vectorsCount() - step; offset += step) {
+            std::stringstream ss;
+            ss << name << ": " << offset * sizeof(double_v) / GB << " - "
+                << (offset + step) * sizeof(double_v) / GB;
+            {
+                m_threadPool.waitReady();
+                Benchmark bench(ss.str().c_str(), step * m_threadCount * interpretFactor, unit);
+                Timer timer;
+                for (int rep = 0; rep < 2; ++rep) {
+                    m_threadPool.executeWith(m_memory, [offset]() -> size_t { return offset; }, step / 16, 1);
+                    testFun({m_memory, &timer, offset, step / 16, 1});
+                    m_threadPool.waitReady();
+                    m_threadPool.eachTimer([&bench](const Timer &t) { bench.addTiming(t); });
+                    bench.addTiming(timer);
+                }
+                bench.Print();
+            }
+        }
+    }
+
+    size_t sizes[] = {
+        CpuId::L1Data(),
+        CpuId::L2Data(),
+        CpuId::L3Data()
+    };
+    for (int i = 0; i < 3; ++i) {
+        size_t size = sizes[i];
+        if (size > 0) {
+            size /= 2;
+            std::stringstream ss;
+            ss << name << " (" << size / 1024 << "kB)";
+            if (m_only.empty() || m_only == ss.str()) {
+                for (size_t offset = 0; offset <= m_memory->vectorsCount() - step; offset += step) {
+                    ss << ": " << offset * sizeof(double_v) / GB << " - "
+                        << (offset + size / 16) * sizeof(double_v) / GB;
+                    const int repetitions = step / size;
+                    Benchmark bench(ss.str().c_str(), size * repetitions * m_threadCount * interpretFactor, unit);
+                    Timer timer;
+                    for (int rep = 0; rep < 2; ++rep) {
+                        size_t offset2 = offset;
+                        m_threadPool.executeWith(m_memory, [&offset2, size] { return offset2 += size / 16; }, size / 16, repetitions);
+                        testFun({m_memory, &timer, offset, size / 16, repetitions});
+                        m_threadPool.waitReady();
+                        m_threadPool.eachTimer([&bench](const Timer &t) { bench.addTiming(t); });
+                        bench.addTiming(timer);
+                    }
+                    bench.Print();
+                }
+            }
+        }
+    }
+}/*}}}*/
+
+std::vector<int> parseOnlyCpus()/*{{{*/
+{
+    const std::string cpusStrings = valueForArgument("--onlyCpus", std::string());
+    std::vector<int> r;
+    int id = -1;
+    for (const auto &c : cpusStrings) {
+        if (c >= '0' && c <= '9') {
+            if (id < 0) {
+                id = (c - '0');
+            } else {
+                id = id * 10 + (c - '0');
+            }
+        } else if (id >= 0) {
+            r.push_back(id);
+            id = -1;
+        }
+    }
+    if (id >= 0) {
+        r.push_back(id);
+    }
+    return r;
+}
+/*}}}*/
+BenchmarkRunner::BenchmarkRunner()/*{{{*/
+    : m_onlyCpuIds(parseOnlyCpus()),
+    m_threadCount(m_onlyCpuIds.empty() ? valueForArgument("--threads", 1) : m_onlyCpuIds.size()),
+    m_threadPool(m_threadCount - 1),
+    m_maxMemorySize(largestMemorySize() / GB),
+    m_memorySize(valueForArgument("--size", m_maxMemorySize)),
+    m_only(valueForArgument("--only", std::string())),
+    m_memory(nullptr)
+{
+#ifndef NO_LIBNUMA/*{{{*/
     if (numa_available() == -1) {
         std::cerr << "NUMA interface does not work. Abort." << std::endl;
-        return 1;
+        return;
     }
 #ifdef LINK_STATICALLY
     numa_init();
@@ -314,33 +561,64 @@ int bmain()
     // first make sure we don't get interleaved memory; this would defeat the purpose of this
     // benchmark
     //numa_set_interleave_mask(numa_no_nodes);
-#endif
+#endif/*}}}*/
 
-    const size_t maxMemorySize = largestMemorySize() / GB;
-    const size_t memorySize = valueForArgument("--size", maxMemorySize);
-    if (memorySize < 1) {
+    if (m_memorySize < 1) {/*{{{*/
         std::cerr << "Need at least 1GB." << std::endl;
-        return 1;
+        return;
     }
-    if (memorySize > maxMemorySize) {
+    if (m_memorySize > m_maxMemorySize) {
         std::cerr << "Not enough memory available. Expect crashes/OOM kills." << std::endl;
-    }
-    Memory<double_v> mem(memorySize * GB / sizeof(double));
+    }/*}}}*/
+    m_memory = new MemT(m_memorySize * GB / sizeof(double));
     mlockall(MCL_CURRENT);
 
-#ifdef NO_LIBNUMA
+    if (!m_onlyCpuIds.empty()) {/*{{{*/
+        cpu_set_t cpumask;
+        sched_getaffinity(0, sizeof(cpu_set_t), &cpumask);
+        //const int cpucount = cpuCount(&cpumask);
+        const int cpuid = m_onlyCpuIds.back();
+        m_onlyCpuIds.pop_back();
+        std::ostringstream str;
+        for (const auto &id : m_onlyCpuIds) {
+            str << id << ',';
+        }
+        str << cpuid;
+        Benchmark::addColumn("CPU_ID");
+        Benchmark::setColumnData("CPU_ID", str.str());
+        cpuZero(&cpumask);
+        cpuSet(cpuid, &cpumask);
+        sched_setaffinity(0, sizeof(cpu_set_t), &cpumask);
+        m_threadPool.setPinning(m_onlyCpuIds);
+        executeAllTests();
+        return;
+    }
+/*}}}*/
+#ifdef NO_LIBNUMA/*{{{*/
     cpu_set_t cpumask;
     sched_getaffinity(0, sizeof(cpu_set_t), &cpumask);
     int cpucount = cpuCount(&cpumask);
     Benchmark::addColumn("CPU_ID");
     for (int cpuid = valueForArgument("--firstCpu", 1); cpuid < cpucount; cpuid += valueForArgument("--cpuStep", 6)) {
-        std::ostringstream str;
-        str << cpuid;
-        Benchmark::setColumnData("CPU_ID", str.str());
-        cpuZero(&cpumask);
-        cpuSet(cpuid, &cpumask);
-        sched_setaffinity(0, sizeof(cpu_set_t), &cpumask);
-#else
+        if (m_threadCount == 1) {
+            std::ostringstream str;
+            str << cpuid;
+            Benchmark::setColumnData("CPU_ID", str.str());
+            cpuZero(&cpumask);
+            cpuSet(cpuid, &cpumask);
+            sched_setaffinity(0, sizeof(cpu_set_t), &cpumask);
+        } else {
+            std::ostringstream str;
+            str << cpuid << " - " << cpuid + m_threadCount - 1;
+            Benchmark::setColumnData("CPU_ID", str.str());
+            cpuZero(&cpumask);
+            cpuSet(cpuid, &cpumask);
+            sched_setaffinity(0, sizeof(cpu_set_t), &cpumask);
+            m_threadPool.setPinning(cpuid);
+        }
+        executeAllTests();
+    }/*}}}*/
+#else/*{{{*/
     // libnuma defines:
     // node: an area where all memory as the same speed as seen from a particular CPU. A node
     //       can contain multiple CPUs
@@ -364,21 +642,30 @@ int bmain()
             numa_bitmask_setbit(nodemask, numaId);
             numa_bind(nodemask);
         }
-#endif
-
-        executeTest("bzero", mem, &testBzero);
-        executeTest("read",  mem, &testRead);
-        executeTest("read w/ prefetch", mem, &testReadPrefetch);
-        executeTest("add 1", mem, &testAddOne);
-        executeTest("add 1 w/ prefetch", mem, &testAddOnePrefetch);
-        executeTest("read latency", mem, &testReadLatency);
-        Benchmark::finalize();
+        executeAllTests();
     }
-
-#ifndef NO_LIBNUMA
+#endif/*}}}*/
+#ifndef NO_LIBNUMA/*{{{*/
     if (nodemask) {
         numa_free_nodemask(nodemask);
     }
-#endif
-    return 0;
+#endif/*}}}*/
+}/*}}}*/
+void BenchmarkRunner::executeAllTests()/*{{{*/
+{
+    executeTest("bzero"            , &testBzero         , "Byte", 1.);
+    executeTest("read"             , &testRead          , "Byte", 1.);
+    executeTest("read w/ prefetch" , &testReadPrefetch  , "Byte", 1.);
+    executeTest("add 1"            , &testAddOne        , "Byte", 1.);
+    executeTest("add 1 w/ prefetch", &testAddOnePrefetch, "Byte", 1.);
+    executeTest("read latency"     , &testReadLatency   , "read", 1. / VectorsInCacheLine); // this test only reads one vector out of a cacheline
+    Benchmark::finalize();
 }
+/*}}}*/
+int bmain()/*{{{*/
+{
+    BenchmarkRunner runner;
+    return 0;
+}/*}}}*/
+
+// vim: foldmethod=marker
