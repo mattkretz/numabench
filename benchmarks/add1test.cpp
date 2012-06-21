@@ -28,7 +28,8 @@ class Add1Test
     int m_state;
     double m_cycles;
     double *__restrict__ mem;
-    static constexpr int Iterations = 1000;
+    int m_iterations;
+    static int maxThreadCount() { cpu_set_t cpumask; sched_getaffinity(0, sizeof(cpu_set_t), &cpumask); return cpuCount(&cpumask); }
 
 public:
     Add1Test()
@@ -43,14 +44,18 @@ public:
             CpuId::L3Data() / sizeof(double)
         };
         for (size_t count : counts) {
-            //std::cout << count << std::endl;
-            m_state = 0;
-            m_cycles = 0.;
-            std::thread poison(poisonThreadCaller, this, 1, count);
-            std::thread bench(benchmarkThreadCaller, this, 0, count);
-            poison.join();
-            bench.join();
-            std::cout << "required " << m_cycles / Iterations << " cycles.\n";
+            m_iterations = 8000 * 1024 / count;
+            const int benchCpu = 0;
+            for (int poisonCpu = 0; poisonCpu < maxThreadCount(); ++poisonCpu) {
+                m_state = 0;
+                m_cycles = 0.;
+                std::thread poison(poisonThreadCaller, this, poisonCpu, count);
+                std::thread bench(benchmarkThreadCaller, this, benchCpu, count);
+                poison.join();
+                bench.join();
+                std::cout << poisonCpu << /*'\t' << benchCpu <<*/ '\t' << count * sizeof(double) / 1024
+                    << '\t' << m_cycles / m_iterations << '\n';
+            }
         }
     }
 
@@ -66,7 +71,7 @@ public:
     void poisonThread(int cpuId, size_t count)
     {
         pinToCpu(cpuId);
-        while (m_state < 2 * Iterations) {
+        while (m_state < 2 * m_iterations) {
             unique_lock<mutex> lock(m_mutex);
             if ((m_state & 1) == 1) {
                 m_wait.wait(lock);
@@ -85,21 +90,21 @@ public:
         pinToCpu(cpuId);
         TimeStampCounter tsc;
         const __m128d two = _mm_set1_pd(2.);
-        while (m_state < 2 * Iterations) {
+        while (m_state < 2 * m_iterations) {
             unique_lock<mutex> lock(m_mutex);
             if ((m_state & 1) == 0) {
                 m_wait.wait(lock);
             }
             tsc.Start();
-            for (size_t i = 0; i < count; i += 8) {
-                const __m128d tmp0 = _mm_add_pd(two, _mm_load_pd(&mem[i + 0]));
-                //const __m128d tmp1 = _mm_mul_pd(two, _mm_load_pd(&mem[i + 2]));
-                const __m128d tmp2 = _mm_add_pd(two, _mm_load_pd(&mem[i + 4]));
-                //const __m128d tmp3 = _mm_mul_pd(two, _mm_load_pd(&mem[i + 6]));
-                _mm_store_pd(&mem[i + 0], tmp0);
-                //_mm_store_pd(&mem[i + 2], tmp1);
-                _mm_store_pd(&mem[i + 4], tmp2);
-                //_mm_store_pd(&mem[i + 6], tmp3);
+            for (size_t i = 0; i < count; i += 16) {
+                const __m128d tmp0 = _mm_add_pd(two, _mm_load_pd(&mem[i +  0]));
+                const __m128d tmp2 = _mm_add_pd(two, _mm_load_pd(&mem[i +  4]));
+                const __m128d tmp4 = _mm_add_pd(two, _mm_load_pd(&mem[i +  8]));
+                const __m128d tmp6 = _mm_add_pd(two, _mm_load_pd(&mem[i + 12]));
+                _mm_store_pd(&mem[i +  0], tmp0);
+                _mm_store_pd(&mem[i +  4], tmp2);
+                _mm_store_pd(&mem[i +  8], tmp4);
+                _mm_store_pd(&mem[i + 12], tmp6);
             }
             tsc.Stop();
             ++m_state;
