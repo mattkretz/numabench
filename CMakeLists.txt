@@ -257,6 +257,9 @@ set(USE_LIBNUMA TRUE CACHE BOOL "Use libnuma to automatically schedule the bench
 if(NOT LIBNUMA OR NOT USE_LIBNUMA)
    add_definitions(-DNO_LIBNUMA)
 endif()
+if(USE_LIBNUMA AND NOT LIBNUMA)
+   message(WARNING "libnuma was not found. Building without.")
+endif()
 
 add_executable(numabench benchmarks/numabench.cpp)
 add_target_property(numabench COMPILE_FLAGS "-DVC_IMPL=SSE")
