@@ -35,7 +35,6 @@
 extern "C" void numa_init();
 
 using namespace Vc;/*}}}*/
-
 enum Constants {/*{{{*/
     PageSize = 4096,
     CacheLineSize = 64,
@@ -47,18 +46,22 @@ enum Constants {/*{{{*/
 };
 static const size_t GB = 1024ull * 1024ull * 1024ull;
 static const size_t step = GB / sizeof(double_v);/*}}}*/
-
 typedef Memory<double_v> MemT;
-struct TestArguments
+struct TestArguments/*{{{*/
 {
     MemT *__restrict__ mem;
     Timer *__restrict__ timer;
     size_t offset;
     size_t size;
     int repetitions;
-};
+};/*}}}*/
 typedef void (*TestFunction)(const TestArguments &args);
-
+struct CpuRange/*{{{*/
+{
+    int first;
+    int last;
+    int step;
+};/*}}}*/
 class OneWaitsForN/*{{{*/
 {
 private:
@@ -90,7 +93,6 @@ public:
         }
     }
 };/*}}}*/
-
 class ThreadData/*{{{*/
 {
     cpu_set_t m_cpumask;
@@ -98,6 +100,7 @@ class ThreadData/*{{{*/
     std::condition_variable_any &m_wait;
     OneWaitsForN &m_waitForEnd;
     std::atomic<bool> m_exit;
+    bool m_disabled;
     Timer m_timer;
     std::thread m_thread;
     TestFunction m_testFunction;
@@ -108,6 +111,7 @@ class ThreadData/*{{{*/
             : m_wait(*wait),
             m_waitForEnd(*waitForEnd),
             m_exit(false),
+            m_disabled(false),
             m_thread(ThreadData::callMainLoop, this)
         {}
 
@@ -115,10 +119,25 @@ class ThreadData/*{{{*/
 
         void setPinning(int cpuid) // called from main thread
         {
-            m_mutex.lock();
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_disabled = false;
             cpuZero(&m_cpumask);
             cpuSet(cpuid, &m_cpumask);
-            m_mutex.unlock();
+        }
+
+        void disable()
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_disabled = true;
+        }
+        void enable()
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_disabled = false;
+        }
+        bool isEnabled() const
+        {
+            return !m_disabled;
         }
 
         void exit() // called from main thread
@@ -133,17 +152,15 @@ class ThreadData/*{{{*/
 
         void setTestFunction(TestFunction f)
         {
-            m_mutex.lock();
+            std::lock_guard<std::mutex> lock(m_mutex);
             m_testFunction = f;
-            m_mutex.unlock();
         }
 
         void setParameters(TestArguments args)
         {
-            m_mutex.lock();
+            std::lock_guard<std::mutex> lock(m_mutex);
             m_arguments = args;
             m_arguments.timer = &m_timer;
-            m_mutex.unlock();
         }
 
         static void callMainLoop(ThreadData *data) // thread
@@ -163,6 +180,8 @@ class ThreadData/*{{{*/
 
                 if (m_exit) {
                     break;
+                } else if (m_disabled) {
+                    continue;
                 }
 
                 // first pin the thread to a single core/cpu
@@ -175,14 +194,15 @@ class ThreadData/*{{{*/
             m_mutex.unlock();
         }
 };/*}}}*/
-
 class ThreadPool/*{{{*/
 {
     OneWaitsForN m_waitForEnd;
     std::condition_variable_any m_waitForStart;
     std::vector<std::shared_ptr<ThreadData>> m_workers;
+    static int maxThreadCount() { cpu_set_t cpumask; sched_getaffinity(0, sizeof(cpu_set_t), &cpumask); return cpuCount(&cpumask); }
+
 public:
-    ThreadPool(int _size)
+    ThreadPool(int _size = maxThreadCount())
         : m_waitForEnd(_size),
         m_workers(_size)
     {
@@ -190,8 +210,6 @@ public:
             m_workers[i] = std::make_shared<ThreadData>(&m_waitForEnd, &m_waitForStart);
         }
     }
-
-    size_t size() const { return m_workers.size(); }
 
     void waitReady()
     {
@@ -209,6 +227,16 @@ public:
         assert(m_workers.size() == cpus.size());
         for (size_t i = 0; i < m_workers.size(); ++i) {
             m_workers[i]->setPinning(cpus[i]);
+        }
+    }
+    void setPinning(CpuRange range)
+    {
+        unsigned int i = 0;
+        for (int id = range.first; id <= range.last; id += range.step) {
+            m_workers[i++]->setPinning(id);
+        }
+        for (; i < m_workers.size(); ++i) {
+            m_workers[i]->disable();
         }
     }
 
@@ -231,7 +259,9 @@ public:
     template<typename F> void eachTimer(F f) const
     {
         for (const auto &t : m_workers) {
-            f(t->timer());
+            if (t->isEnabled()) {
+                f(t->timer());
+            }
         }
     }
 
@@ -246,7 +276,6 @@ public:
         }
     }
 };/*}}}*/
-
 static size_t largestMemorySize()/*{{{*/
 {
     using namespace std;
@@ -257,7 +286,6 @@ static size_t largestMemorySize()/*{{{*/
     meminfo.close();
     return freeMem * 1024;
 }/*}}}*/
-
 void testBzero(const TestArguments &args)/*{{{*/
 {
     args.timer->start();
@@ -266,7 +294,6 @@ void testBzero(const TestArguments &args)/*{{{*/
     }
     args.timer->stop();
 }/*}}}*/
-
 void testAddOne(const TestArguments &args)/*{{{*/
 {
     const double_v one = 1.;
@@ -286,7 +313,6 @@ void testAddOne(const TestArguments &args)/*{{{*/
     }
     args.timer->stop();
 }/*}}}*/
-
 void testAddOnePrefetch(const TestArguments &args)/*{{{*/
 {
     const double_v one = 1.;
@@ -307,7 +333,6 @@ void testAddOnePrefetch(const TestArguments &args)/*{{{*/
     }
     args.timer->stop();
 }/*}}}*/
-
 void testRead(const TestArguments &args)/*{{{*/
 {
     double *__restrict__ mStart = args.mem->entries() + args.offset * double_v::Size;
@@ -325,7 +350,6 @@ void testRead(const TestArguments &args)/*{{{*/
     }
     args.timer->stop();
 }/*}}}*/
-
 void testReadPrefetch(const TestArguments &args)/*{{{*/
 {
     double *__restrict__ mStart = args.mem->entries() + args.offset * double_v::Size;
@@ -344,7 +368,6 @@ void testReadPrefetch(const TestArguments &args)/*{{{*/
     }
     args.timer->stop();
 }/*}}}*/
-
 /** testReadLatency {{{
  * We want to measure the latency of a read from memory. To achieve this we read with a stride of
  * PageSize bytes. Then the hardware prefetcher will not do any prefetches and every load will hit a
@@ -366,7 +389,8 @@ void testReadLatency(const TestArguments &args)
         for (int rep = 0; rep < args.repetitions; ++rep) {
             for (Ptr mCacheLine = mStart; mCacheLine < mPageEnd; mCacheLine += DoublesInCacheLine) {
                 for (Ptr m = mCacheLine; m < mEnd; m += DoublesInPage) {
-                    asm("" :: "d"(*m));
+                    //asm volatile("lfence");
+                    asm volatile("" :: "d"(*m));
                 }
             }
         }
@@ -374,8 +398,9 @@ void testReadLatency(const TestArguments &args)
         for (int rep = 0; rep < args.repetitions; ++rep) {
             for (Ptr mCacheLine = mStart; mCacheLine < mPageEnd; mCacheLine += DoublesInCacheLine) {
                 for (Ptr m = mCacheLine; m < mEnd - DoublesInPage; m += 2 * DoublesInPage) {
-                    asm("" :: "d"(*m));
-                    asm("" :: "d"(*(m + DoublesInPage)));
+                    //asm volatile("lfence");
+                    asm volatile("" :: "d"(*m));
+                    asm volatile("" :: "d"(*(m + DoublesInPage)));
                 }
             }
         }
@@ -383,17 +408,17 @@ void testReadLatency(const TestArguments &args)
         for (int rep = 0; rep < args.repetitions; ++rep) {
             for (Ptr mCacheLine = mStart; mCacheLine < mPageEnd; mCacheLine += DoublesInCacheLine) {
                 for (Ptr m = mCacheLine; m < mEnd - 3 * DoublesInPage; m += 4 * DoublesInPage) {
-                    asm("" :: "d"(*m));
-                    asm("" :: "d"(*(m + DoublesInPage)));
-                    asm("" :: "d"(*(m + 2 * DoublesInPage)));
-                    asm("" :: "d"(*(m + 3 * DoublesInPage)));
+                    //asm volatile("lfence");
+                    asm volatile("" :: "d"(*m));
+                    asm volatile("" :: "d"(*(m + DoublesInPage)));
+                    asm volatile("" :: "d"(*(m + 2 * DoublesInPage)));
+                    asm volatile("" :: "d"(*(m + 3 * DoublesInPage)));
                 }
             }
         }
     }
     args.timer->stop();
 }/*}}}*/
-
 template<typename T> struct convertStringTo/*{{{*/
 {
     explicit convertStringTo(const std::string &s);
@@ -408,7 +433,6 @@ template<> convertStringTo<unsigned long>::convertStringTo(const std::string &s)
 template<> convertStringTo<long long>::convertStringTo(const std::string &s) : m_data(atoll(s.c_str())) {}
 template<> convertStringTo<unsigned long long>::convertStringTo(const std::string &s) : m_data(atoll(s.c_str())) {}
 template<> convertStringTo<std::string>::convertStringTo(const std::string &s) : m_data(s) {}/*}}}*/
-
 template<typename T> static T valueForArgument(const char *name, T defaultValue)/*{{{*/
 {
     ArgumentVector::iterator it = std::find(g_arguments.begin(), g_arguments.end(), name);
@@ -420,7 +444,6 @@ template<typename T> static T valueForArgument(const char *name, T defaultValue)
     }
     return defaultValue;
 }/*}}}*/
-
 /*SET_HELP_TEXT{{{*/
 #ifdef NO_LIBNUMA
 SET_HELP_TEXT(
@@ -429,7 +452,7 @@ SET_HELP_TEXT(
         "  --size <GB>\n"
         "  --only <test function>\n"
         "  --threads <N>\n"
-        "  --onlyCpus <id[,id[,id[,id[...]]]]>\n"
+        "  --cores <firstId-lastId[:step][,firstId-lastId[:step][...]]>\n"
         );
 #else
 SET_HELP_TEXT(
@@ -438,15 +461,14 @@ SET_HELP_TEXT(
         "  --size <GB>\n"
         "  --only <test function>\n"
         "  --threads <N>\n"
-        "  --onlyCpus <id[,id[,id[,id[...]]]]>\n"
+        "  --cores <firstId-lastId[:step][,firstId-lastId[:step][...]]>\n"
         );
 #endif/*}}}*/
-
 class BenchmarkRunner/*{{{*/
 {
 private:
-    std::vector<int> m_onlyCpuIds;
-    const int m_threadCount;
+    const std::vector<CpuRange> m_coreIds;
+    int m_threadCount;
     ThreadPool m_threadPool;
     const size_t m_maxMemorySize;
     const size_t m_memorySize;
@@ -459,7 +481,6 @@ private:
 public:
     BenchmarkRunner();
 };/*}}}*/
-
 void BenchmarkRunner::executeTest(const char *name, TestFunction testFun, const char *unit, double interpretFactor)/*{{{*/
 {
     m_threadPool.setTestFunction(testFun);
@@ -516,34 +537,51 @@ void BenchmarkRunner::executeTest(const char *name, TestFunction testFun, const 
         }
     }
 }/*}}}*/
-
-std::vector<int> parseOnlyCpus()/*{{{*/
+inline std::ostream &operator<<(std::ostream &out, const CpuRange &range)/*{{{*/
 {
-    const std::string cpusStrings = valueForArgument("--onlyCpus", std::string());
-    std::vector<int> r;
-    int id = -1;
+    return out << "Range " << range.first << " - " << range.last << ", step " << range.step << '\n';
+}
+/*}}}*/
+std::vector<CpuRange> parseOnlyCpus()/*{{{*/
+{
+    enum State {
+        ReadFirst, ReadLast, ReadStep
+    };
+    const std::string cpusStrings = valueForArgument("--cores", std::string());
+    std::vector<CpuRange> r;
+    CpuRange range = { 0, 0, 1 };
+    State state = ReadFirst;
     for (const auto &c : cpusStrings) {
         if (c >= '0' && c <= '9') {
-            if (id < 0) {
-                id = (c - '0');
-            } else {
-                id = id * 10 + (c - '0');
+            switch (state) {
+            case ReadFirst:
+                range.first = range.first * 10 + (c - '0');
+                break;
+            case ReadLast:
+                range.last = range.last * 10 + (c - '0');
+                break;
+            case ReadStep:
+                range.step = range.step * 10 + (c - '0');
+                break;
             }
-        } else if (id >= 0) {
-            r.push_back(id);
-            id = -1;
+        } else if (c == '-') {
+            state = ReadLast;
+        } else if (c == ':') {
+            state = ReadStep;
+            range.step = 0;
+        } else if (c == ',') {
+            state = ReadFirst;
+            r.push_back(range);
+            range = { 0, 0, 1 };
         }
     }
-    if (id >= 0) {
-        r.push_back(id);
-    }
+    r.push_back(range);
     return r;
 }
 /*}}}*/
 BenchmarkRunner::BenchmarkRunner()/*{{{*/
-    : m_onlyCpuIds(parseOnlyCpus()),
-    m_threadCount(m_onlyCpuIds.empty() ? valueForArgument("--threads", 1) : m_onlyCpuIds.size()),
-    m_threadPool(m_threadCount - 1),
+    : m_coreIds(parseOnlyCpus()),
+    m_threadCount(1),
     m_maxMemorySize(largestMemorySize() / GB),
     m_memorySize(valueForArgument("--size", m_maxMemorySize)),
     m_only(valueForArgument("--only", std::string())),
@@ -573,24 +611,27 @@ BenchmarkRunner::BenchmarkRunner()/*{{{*/
     m_memory = new MemT(m_memorySize * GB / sizeof(double));
     mlockall(MCL_CURRENT);
 
-    if (!m_onlyCpuIds.empty()) {/*{{{*/
-        cpu_set_t cpumask;
-        sched_getaffinity(0, sizeof(cpu_set_t), &cpumask);
-        //const int cpucount = cpuCount(&cpumask);
-        const int cpuid = m_onlyCpuIds.back();
-        m_onlyCpuIds.pop_back();
-        std::ostringstream str;
-        for (const auto &id : m_onlyCpuIds) {
-            str << id << ',';
-        }
-        str << cpuid;
+    if (!m_coreIds.empty()) {/*{{{*/
         Benchmark::addColumn("CPU_ID");
-        Benchmark::setColumnData("CPU_ID", str.str());
-        cpuZero(&cpumask);
-        cpuSet(cpuid, &cpumask);
-        sched_setaffinity(0, sizeof(cpu_set_t), &cpumask);
-        m_threadPool.setPinning(m_onlyCpuIds);
-        executeAllTests();
+        for (auto cpuRange : m_coreIds) {
+            cpu_set_t cpumask;
+            sched_getaffinity(0, sizeof(cpu_set_t), &cpumask);
+            const int cpuid = cpuRange.first;
+            cpuRange.first += cpuRange.step;
+            std::ostringstream str;
+            str << cpuid;
+            m_threadCount = 1;
+            for (int id = cpuRange.first; id <= cpuRange.last; id += cpuRange.step) {
+                str << ',' << id;
+                ++m_threadCount;
+            }
+            Benchmark::setColumnData("CPU_ID", str.str());
+            cpuZero(&cpumask);
+            cpuSet(cpuid, &cpumask);
+            sched_setaffinity(0, sizeof(cpu_set_t), &cpumask);
+            m_threadPool.setPinning(cpuRange);
+            executeAllTests();
+        }
         return;
     }
 /*}}}*/
